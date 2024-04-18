@@ -1,3 +1,9 @@
-startHeight:20
-windowX:1700
-windowY:1025
+L:startHeight:20
+L:windowX:1700
+L:windowY:1025
+M:startHeight:20
+M:windowX:900
+M:windowY:500
+S:startHeight:20
+S:windowX:500
+S:windowY:300

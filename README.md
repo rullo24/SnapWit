@@ -2,7 +2,7 @@
 NOTE: This currently only works on Windows
 
 ## Basic Description
-This program resizes the currently focused window to dimensions specified in a configuration file when the "alt" + "shift" + "0" keys are pressed. 
+This program resizes the currently focused window to dimensions specified in a configuration file when the "alt" + "shift" + "0"/"9"/"8" keys are pressed. 
 Created out of necessity, this program was produced as I found myself wasting quite a lot of time resizing windows on my Ultrawide monitor (e.g. opening a 2nd VS Code would create a very small window).
 
 ## Requirements
@@ -10,7 +10,7 @@ Created out of necessity, this program was produced as I found myself wasting qu
 - Go 1.21.4 (or sooner)
 
 ## How it Works
-This program works by checking every 25ms for the pressed shortcut keys. If the required shortcut keys are pressed, the program then resizes the currently focused window to match the settings detailed in the config file.
+This program works by checking every 30ms for the pressed shortcut keys. If the required shortcut keys are pressed, the program then resizes the currently focused window to match the settings detailed in the config file. There are 3 sizes that can be set with 3x shortcuts to do so.
 
 ## Installation
 Download the source code.
@@ -30,9 +30,11 @@ Paste a shortcut created from the compiled executable in this Startup folder. Th
 ## Configuration
 All lines must follow the convention as shown below:
 ```bash
-key:value
+size:key:value
+
+Example: L:startHeight:50
 ```
-For the program to function, "startHeight", "windowX" and "windowY" keys are required. All other keys will be ignored.
+For the program to function, "startHeight", "windowX" and "windowY" keys are required for each of the 3 sizes (S, M, L). All other keys will be ignored.
 - startHeight defines the resized window's top distance from the top of the working area
 - windowX defines the width of the new window
 - windowY defines the height of the new window

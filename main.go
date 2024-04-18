@@ -7,6 +7,7 @@ import (
     "strings"
     "strconv"
     "time"
+    // "fmt" // Used for debugging
 )
 
 // Defining windows function and dll pointers
@@ -23,8 +24,17 @@ var (
 const (
     VK_LSHIFT = 0x10
     VK_ZERO = 0x30
+    VK_EIGHT = 0x38
+    VK_NINE = 0x39
     VK_LMENU = 0xA4
 )
+
+// Creating return struct for each piece of config data
+type configVal struct {
+    windowX int
+    windowY int
+    startHeight int
+}
 
 /////////////////////////////////////////////////////////////////
 /////////////////////////// MAIN FUNC ///////////////////////////
@@ -33,33 +43,45 @@ const (
 func main() {
     // Reading the necessary config file for user defined window size and placement   
     var configData []byte = readConfigFile()
-    windowX, windowY, startHeight := manipConfigData(configData)
+    largeConfig, mediumConfig, smallConfig := manipConfigData(configData) // Returns 3x structs (1x struct for each window size)
 
     // Creating a time ticker (CLK)
-    var ticker *time.Ticker = time.NewTicker(50 * time.Millisecond) // Check for keypress every 50ms (should be enough time to avoid using keyboard events whilst minimising resource usage)
+    var ticker *time.Ticker = time.NewTicker(30 * time.Millisecond) // Check for keypress every 30ms (should be enough time to avoid using keyboard events whilst minimising resource usage)
     defer ticker.Stop() // Stopping the ticker if the function is stopped (Shouldn't ever occur)
 
     for range ticker.C {
-        if shortcutKeysPressed() { // Change the window's screen size/placement if all required shortcut keys are pressed
-            // Preprocessing - Windows API calls
-            screenWidth, _ := getCurrMonitorRes() // Grabbing screen's working area pixel dimensions
-            var currentProgHandle syscall.Handle = getForegroundWindow() // Grabbing the currently focused window ID
-
-            // Calculating startWidth (middle) from current screen
-            var startWidth int = int(screenWidth/2) - int(windowX/2)
-
-            // Changing the window size and location using a windows API call
-            setWindowPos(currentProgHandle, startWidth, startHeight, windowX, windowY)
+        var shortcutPressed uint8 = shortcutKeysPressed()
+        switch shortcutPressed {
+        case 0: // Passing over this iteration (no shortcuts activated)
+        case 1: // Large size wanted
+            boilerplateScript(&largeConfig)
+        case 2: // Medium size wanted
+            boilerplateScript(&mediumConfig)
+        case 3: // Small size wanted
+            boilerplateScript(&smallConfig)
         }
     }
+}
+
+// Reducing boilerplate in the main func
+func boilerplateScript(ptr_configSizeData *configVal) {
+    // Preprocessing - Windows API calls
+    screenWidth, _ := getCurrMonitorRes() // Grabbing screen's working area pixel dimensions
+    var currentProgHandle syscall.Handle = getForegroundWindow() // Grabbing the currently focused window ID
+
+    // Calculating startWidth (middle) from current screen
+    var startWidth int = int(screenWidth/2) - int((*ptr_configSizeData).windowX/2)
+
+    // Changing the window size and location using a windows API call
+    setWindowPos(currentProgHandle, startWidth, (*ptr_configSizeData).startHeight, (*ptr_configSizeData).windowX, (*ptr_configSizeData).windowY)
 }
 
 /////////////////////////////////////////////////////////////////
 /////////////////////////// MAIN FUNC ///////////////////////////
 /////////////////////////////////////////////////////////////////
 
-// Checks if the keyboard shortcut keys were pressed --> alt+shift+0
-func shortcutKeysPressed() bool {
+// Checks if the keyboard shortcut keys were pressed --> Invalid return 0 | [alt+shift+0:Large] return 1 | [alt+shift+9:Medium] return 2 | [alt+shift+8:Small] return 3
+func shortcutKeysPressed() uint8 {
     leftAltPressed, _, _ := procGetKeyState.Call(VK_LMENU) // Checking Left Alt
 
     // NOTE: Result 65409 or 65408 == key currently pressed (presumed: high-order bit is 1 & low-order bit is 0/1 --> 16-bit subtract a value?)
@@ -67,12 +89,22 @@ func shortcutKeysPressed() bool {
         leftShiftPressed, _, _ := procGetKeyState.Call(VK_LSHIFT) // Checking Left Shift 
         if (leftShiftPressed & 0x8000) != 0 { // Left Shift Pressed
             zeroPressed, _, _ := procGetKeyState.Call(VK_ZERO) // Checking Zero
-            if (zeroPressed & 0x8000) != 0 { // Zero Pressed
-                return true // All shortcuts are currently pressed
+            if (zeroPressed & 0x8000) != 0 { // Zero Pressed --> Large Mode Selected
+                return 1
+            }
+            // Nine Pressed --> Medium Mode Selected
+            ninePressed, _, _ := procGetKeyState.Call(VK_NINE) // Checking Nine,
+            if (ninePressed & 0x8000) != 0 { // Zero Pressed --> Large Mode Selected
+                return 2
+            }
+            // Eight Pressed --> Small Mode Selected
+            eightPressed, _, _ := procGetKeyState.Call(VK_EIGHT) // Checking Eight,
+            if (eightPressed & 0x8000) != 0 { // Zero Pressed --> Large Mode Selected
+                return 3
             }
         }
     }
-    return false
+    return 0
 }
 
 // Returns a string that is the directory of the main executable
@@ -155,11 +187,11 @@ func readConfigFile() []byte {
 }
 
 // Manipulates config file to extract the necessary integers we want
-func manipConfigData(configData []byte) (int, int, int) {
-    // Initialising the necessary return variables
-    var windowX int = -1
-    var windowY int = -1
-    var startHeight int = -1
+func manipConfigData(configData []byte) (configVal, configVal, configVal) {
+    // Intialising the 3 size structs to hold necessary window sizing values
+    var largeConfig configVal
+    var mediumConfig configVal
+    var smallConfig configVal
 
     // Grabbing configData lines
     var configString string = string(configData) // Converting byte array to string
@@ -167,43 +199,90 @@ func manipConfigData(configData []byte) (int, int, int) {
     
     // Viewing each line to extract relevant data
     for _, line := range configLines {
-        var idAndValSplit []string = strings.Split(line, ":")
-        switch strings.TrimSpace(idAndValSplit[0]) {
-            case "startHeight":
-                var intStringTrim string = strings.TrimSpace(idAndValSplit[1])
-                shResult, atoiErr := strconv.Atoi(intStringTrim)
-                if atoiErr != nil {
-                    var panicString string = "ERROR: " + atoiErr.Error()
-                    panic(panicString)
-                }
-                startHeight = shResult // Assigning the return value
+        var configLineSplit []string = strings.Split(line, ":") // Determining size in each line
+        var configId string = strings.TrimSpace(configLineSplit[1]) // Obtaining identifier
+        var configIntTrim string = strings.TrimSpace(configLineSplit[2]) // Obtaining value
 
-            case "windowX":
-                var intStringTrim string = strings.TrimSpace(idAndValSplit[1])
-                wxResult, atoiErr := strconv.Atoi(intStringTrim)
-                if atoiErr != nil {
-                    var panicString string = "ERROR: " + atoiErr.Error()
-                    panic(panicString)
+        switch strings.TrimSpace(configLineSplit[0]) { // Determines the 'size' of the config value
+        case "L":
+            if configId == "startHeight" {
+                sHLAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+                largeConfig.startHeight = sHLAsInt // Setting the struct value for function return
+                if err != nil {
+                    panic("ERROR: Failed to conv string --> int")
                 }
-                windowX = wxResult // Assigning the return value
-
-            case "windowY":
-                var intStringTrim string = strings.TrimSpace(idAndValSplit[1])
-                wyResult, atoiErr := strconv.Atoi(intStringTrim)
-                if atoiErr != nil {
-                    var panicString string = "ERROR: " + atoiErr.Error()
-                    panic(panicString)
+            } else if configId == "windowX" {
+                wXLAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+                largeConfig.windowX = wXLAsInt // Setting the struct value for function return
+                if err != nil {
+                    panic("ERROR: Failed to conv string --> int")
                 }
-
-                windowY = wyResult // Assigning the return value
+            } else if configId == "windowY" {
+                wYLAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+                largeConfig.windowY = wYLAsInt // Setting the struct value for function return
+                if err != nil {
+                    panic("ERROR: Failed to conv string --> int")
+                }
+            } else {
+                var panicString string = "ERROR: Invalid L config recognised"
+                panic(panicString)
+            }
+        case "M":
+            if configId == "startHeight" {
+                sHMAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+                mediumConfig.startHeight = sHMAsInt // Setting the struct value for function return
+                if err != nil {
+                    panic("ERROR: Failed to conv string --> int")
+                }
+            } else if configId == "windowX" {
+                wXMAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+                mediumConfig.windowX = wXMAsInt // Setting the struct value for func return
+                if err != nil {
+                    panic("ERROR: Failed to conv string --> int")
+                }
+            } else if configId == "windowY" {
+                wYMAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+                mediumConfig.windowY = wYMAsInt // Setting struct val for func return
+                if err != nil {
+                    panic("ERROR: Failed to conv string --> int")
+                }
+            } else {
+                var panicString string = "ERROR: Invalid M config recognised"
+                panic(panicString)
+            }
+        case "S":
+            if configId == "startHeight" {
+                sHSAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+                smallConfig.startHeight = sHSAsInt // Setting struct val for func return
+                if err != nil {
+                    panic("ERROR: Failed to conv string --> int")
+                }
+            } else if configId == "windowX" {
+                wXSAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+                smallConfig.windowX = wXSAsInt // Setting struct val for func return
+                if err != nil {
+                    panic("ERROR: Failed to conv string --> int")
+                }
+            } else if configId == "windowY" {
+                wYSAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+                smallConfig.windowY = wYSAsInt // Setting struct val for func return
+                if err != nil {
+                    panic("ERROR: Failed to conv string --> int")
+                }
+            } else {
+                var panicString string = "ERROR: Invalid S config recognised"
+                panic(panicString)
+            }
         }
     }
 
-    // Checking if all values have been successfully retrieved
-    if windowX == -1 || windowY == -1 || startHeight == -1 {
+    // Checking if all values have been successfully retrieved --> Ensure all values are intialised before progressing
+    var checkL bool = ((largeConfig.startHeight != 0) && (largeConfig.windowX != 0) && (largeConfig.windowY != 0)) && true 
+    var checkM bool = ((mediumConfig.startHeight != 0) && (mediumConfig.windowX != 0) && (mediumConfig.windowY != 0)) && true
+    var checkS bool = ((smallConfig.startHeight != 0) && (smallConfig.windowX != 0) && (smallConfig.windowY != 0)) && true
+    if !checkL || !checkM || !checkS { // If any values are missing, throw an error
         panic("ERROR: Failed to successfully retrieve all required dimensions")
     }
 
-    return windowX, windowY, startHeight
+    return largeConfig, mediumConfig, smallConfig 
 }
-
