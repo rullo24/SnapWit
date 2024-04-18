@@ -2,7 +2,7 @@
 NOTE: This currently only works on Windows
 
 ## Basic Description
-This program resizes the currently focused window to dimensions specified in a configuration file when the "alt" + "shift" + "0"/"9"/"8" keys are pressed. 
+This program resizes the currently focused window to dimensions specified in a configuration file when the "alt"+"shift"+"9"/"8"/"7" keys are pressed. Further, "alt"+"shift"+"0" has been configured to maximise the currently focused window.
 Created out of necessity, this program was produced as I found myself wasting quite a lot of time resizing windows on my Ultrawide monitor (e.g. opening a 2nd VS Code would create a very small window).
 
 ## Requirements

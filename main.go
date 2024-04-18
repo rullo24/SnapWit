@@ -24,6 +24,7 @@ var (
 const (
     VK_LSHIFT = 0x10
     VK_ZERO = 0x30
+    VK_SEVEN = 0x37
     VK_EIGHT = 0x38
     VK_NINE = 0x39
     VK_LMENU = 0xA4
@@ -53,18 +54,20 @@ func main() {
         var shortcutPressed uint8 = shortcutKeysPressed()
         switch shortcutPressed {
         case 0: // Passing over this iteration (no shortcuts activated)
-        case 1: // Large size wanted
-            boilerplateScript(&largeConfig)
-        case 2: // Medium size wanted
-            boilerplateScript(&mediumConfig)
-        case 3: // Small size wanted
-            boilerplateScript(&smallConfig)
+        case 1: // Activate large screen
+            boilerplateScript(&mediumConfig, true) // mediumConfig used as 'fill-in' to avoid another function writeup
+        case 2: // Large size wanted
+            boilerplateScript(&largeConfig, false)
+        case 3: // Medium size wanted
+            boilerplateScript(&mediumConfig, false)
+        case 4: // Small size wanted
+            boilerplateScript(&smallConfig, false)
         }
     }
 }
 
 // Reducing boilerplate in the main func
-func boilerplateScript(ptr_configSizeData *configVal) {
+func boilerplateScript(ptr_configSizeData *configVal, maximiseBool bool) {
     // Preprocessing - Windows API calls
     screenWidth, _ := getCurrMonitorRes() // Grabbing screen's working area pixel dimensions
     var currentProgHandle syscall.Handle = getForegroundWindow() // Grabbing the currently focused window ID
@@ -73,14 +76,14 @@ func boilerplateScript(ptr_configSizeData *configVal) {
     var startWidth int = int(screenWidth/2) - int((*ptr_configSizeData).windowX/2)
 
     // Changing the window size and location using a windows API call
-    setWindowPos(currentProgHandle, startWidth, (*ptr_configSizeData).startHeight, (*ptr_configSizeData).windowX, (*ptr_configSizeData).windowY)
+    setWindowPos(currentProgHandle, startWidth, (*ptr_configSizeData).startHeight, (*ptr_configSizeData).windowX, (*ptr_configSizeData).windowY, maximiseBool)
 }
 
 /////////////////////////////////////////////////////////////////
 /////////////////////////// MAIN FUNC ///////////////////////////
 /////////////////////////////////////////////////////////////////
 
-// Checks if the keyboard shortcut keys were pressed --> Invalid return 0 | [alt+shift+0:Large] return 1 | [alt+shift+9:Medium] return 2 | [alt+shift+8:Small] return 3
+// Checks if the keyboard shortcut keys were pressed --> Invalid return 0 | [alt+shift+0:Maximise] return 1 | [alt+shift+9:Large] return 2 | [alt+shift+8:Medium] return 3 | [alt+shift+7:Small] return 4
 func shortcutKeysPressed() uint8 {
     leftAltPressed, _, _ := procGetKeyState.Call(VK_LMENU) // Checking Left Alt
 
@@ -89,18 +92,23 @@ func shortcutKeysPressed() uint8 {
         leftShiftPressed, _, _ := procGetKeyState.Call(VK_LSHIFT) // Checking Left Shift 
         if (leftShiftPressed & 0x8000) != 0 { // Left Shift Pressed
             zeroPressed, _, _ := procGetKeyState.Call(VK_ZERO) // Checking Zero
-            if (zeroPressed & 0x8000) != 0 { // Zero Pressed --> Large Mode Selected
+            if (zeroPressed & 0x8000) != 0 { // Zero Pressed --> Maximise Mode Selected
                 return 1
             }
-            // Nine Pressed --> Medium Mode Selected
+            // Nine Pressed --> Large Mode Selected
             ninePressed, _, _ := procGetKeyState.Call(VK_NINE) // Checking Nine,
-            if (ninePressed & 0x8000) != 0 { // Zero Pressed --> Large Mode Selected
+            if (ninePressed & 0x8000) != 0 { // Nine Pressed --> Large Mode Selected
                 return 2
             }
-            // Eight Pressed --> Small Mode Selected
+            // Eight Pressed --> Medium Mode Selected
             eightPressed, _, _ := procGetKeyState.Call(VK_EIGHT) // Checking Eight,
-            if (eightPressed & 0x8000) != 0 { // Zero Pressed --> Large Mode Selected
+            if (eightPressed & 0x8000) != 0 { // Eight Pressed --> Medium Mode Selected
                 return 3
+            }
+            // Seven Pressed --> Small Mode Selected
+            sevenPressed, _, _ := procGetKeyState.Call(VK_SEVEN) // Checking Seven,
+            if (sevenPressed & 0x8000) != 0 { // Seven Pressed --> Small Mode Selected
+                return 4
             }
         }
     }
@@ -145,28 +153,35 @@ func getCurrMonitorRes() (int, int) {
 }
 
 // Given a window (hwnd), this changes the windows position
-func setWindowPos(currentProgHandle syscall.Handle, locX, locY, windowX, windowY int) {
+func setWindowPos(currentProgHandle syscall.Handle, locX, locY, windowX, windowY int, maximiseBool bool) {
     // Set the current window to a "Normal" window to avoid issues with fullscreen not responding to procSetWindowPos
     const SW_SHOWNORMAL uintptr = uintptr(1) // If the window is minimised, maximised, or arranged, the system restores it to its original size and position.
-    showWindowResult, _, showErr := procShowWindow.Call(uintptr(currentProgHandle), SW_SHOWNORMAL)
-    if showWindowResult == 0 {
-        var panicString string = "ERROR: " + showErr.Error()
-        panic(panicString) 
-    }
-
-    moveResult, _, moveErr := procSetWindowPos.Call(
-        uintptr(currentProgHandle),
-        0, // hWndInsertAfter (Optional) --> HWND_TOP = 0
-        uintptr(locX),
-        uintptr(locY),
-        uintptr(windowX),
-        uintptr(windowY),
-        0x0040, // uFlag: SWP_SHOWWINDOW
-    )
-
-    if moveResult == 0 {
-        var panicString string = "ERROR: " + moveErr.Error()
-        panic(panicString)
+    const SW_MAXIMISE uintptr = uintptr(3) // Flag for maximise
+    if maximiseBool {
+        maximiseResult, _, maxErr := procShowWindow.Call(uintptr(currentProgHandle), SW_MAXIMISE)
+        if maximiseResult == 0 {
+            var panicString string = "ERROR: " + maxErr.Error()
+            panic(panicString) 
+        }
+    } else {
+        showWindowResult, _, showErr := procShowWindow.Call(uintptr(currentProgHandle), SW_SHOWNORMAL)
+        if showWindowResult == 0 {
+            var panicString string = "ERROR: " + showErr.Error()
+            panic(panicString) 
+        }
+        moveResult, _, moveErr := procSetWindowPos.Call(
+            uintptr(currentProgHandle),
+            0, // hWndInsertAfter (Optional) --> HWND_TOP = 0
+            uintptr(locX),
+            uintptr(locY),
+            uintptr(windowX),
+            uintptr(windowY),
+            0x0040, // uFlag: SWP_SHOWWINDOW
+        )
+        if moveResult == 0 {
+            var panicString string = "ERROR: " + moveErr.Error()
+            panic(panicString)
+        }
     }
 }
 
