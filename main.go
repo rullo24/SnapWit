@@ -1,324 +1,319 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"fmt"
 	"log"
 	"os"
-	"os/exec"
-	"runtime"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
-
-	"golang.org/x/term"
 )
 
-// global variable mutex to avoid race conditions
-var sync_mu sync.Mutex
+// Defining windows function and dll pointers
+var (
+	user32                  = syscall.NewLazyDLL("user32.dll")
+	procGetForegroundWindow = user32.NewProc("GetForegroundWindow")
+	procSetWindowPos        = user32.NewProc("SetWindowPos")
+	procGetSystemMetrics    = user32.NewProc("GetSystemMetrics")
+	procShowWindow          = user32.NewProc("ShowWindow")
+	procGetKeyState         = user32.NewProc("GetKeyState")
+)
 
-// function for readability in code
-func accept_and_clean_user_input(p_avail_resp_keys *[]rune) (rune, error) {
-	// converting runes to bytes (if available) --> throw error if there are any UNICODE chars
-	var avail_resp_keys_ascii []byte
-	sync_mu.Lock()
-	for _, key := range *p_avail_resp_keys {
-		if !rune_is_ascii_compat(key) { // fails if rune cannot be converted to ASCII --> should not happen by keyboard presses
-			return 0x0, errors.New("could not convert rune to ASCII")
-		}
-		avail_resp_keys_ascii = append(avail_resp_keys_ascii, byte(key)) // adding the byte (ASCII) char to the list of available keys
-	}
-	sync_mu.Unlock()
+// Virtual Key Codes
+const (
+	VK_LSHIFT = 0x10
+	VK_ZERO   = 0x30
+	VK_SEVEN  = 0x37
+	VK_EIGHT  = 0x38
+	VK_NINE   = 0x39
+	VK_LMENU  = 0xA4
+)
 
-	// change terminal mode to raw to read single bytes
-	old_state, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return 0x0, err
-	}
-	defer term.Restore(int(os.Stdin.Fd()), old_state) // Ensure terminal mode is restored after reading
-
-	// runs infinitely until a valid ASCII key is provided
-	for {
-		var curr_char byte
-		var temp_buf []byte = make([]byte, 1)      // single byte slice buffer
-		_, char_get_err := os.Stdin.Read(temp_buf) // read a single byte into curr_char
-		if char_get_err != nil {
-			return 0x0, char_get_err // return because of error
-		}
-		curr_char = temp_buf[0] // assigning curr char as the only byte in the buffer
-
-		for _, key := range avail_resp_keys_ascii {
-			if curr_char == key {
-				return rune(key), nil // return the found key
-			}
-		}
-	}
+// Creating return struct for each piece of config data
+type configVal struct {
+	windowX     int
+	windowY     int
+	startHeight int
 }
 
-func rune_is_ascii_compat(target_r rune) bool {
-	return target_r >= 0 && target_r <= 127
-}
+/////////////////////////////////////////////////////////////////
+/////////////////////////// MAIN FUNC ///////////////////////////
+/////////////////////////////////////////////////////////////////
 
-// updating the current time --> infinite run until program close
-func constant_update_current_time(ctx context.Context, p_current_time_obj *time.Time) { // runs in a separate goroutine
-	for {
-		select {
-		case <-ctx.Done(): // stop goroutine (called at end of program)
-			return
-		default: // running as usual unless stop is asked
-			time.Sleep(10 * time.Millisecond) // updating every certain length of time
-			sync_mu.Lock()
-			*p_current_time_obj = time.Now()
-			sync_mu.Unlock()
-		}
+func get_main_dir() (string, error) {
+	exec_path, exec_err := os.Executable()
+	if exec_err != nil {
+		return "", exec_err
 	}
-}
-
-// run in the background in a goroutine --> printing time if available every so often
-func print_time_since_stopwatch_start(ctx context.Context, p_curr_time *time.Time, p_timer_start_time *time.Time, p_should_print_flag *bool) {
-	var time_diff time.Duration
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			time.Sleep(5 * time.Millisecond) // print every 500ms
-			sync_mu.Lock()
-			if !(*p_timer_start_time).Equal(time.Unix(0, 0)) && *p_should_print_flag { // only continue if the timer is set (UNIX == 0 means not set)
-				time_diff = (*p_curr_time).Sub(*p_timer_start_time) // finding time diff between current time and timer start
-				var diff_hours uint64 = uint64(time_diff.Hours())
-				var diff_mins uint64 = uint64(time_diff.Minutes()) % 60      // modulus used to only look at the remainder since last full hour
-				var diff_secs uint64 = uint64(time_diff.Seconds()) % 60      // modulus used to only look at the remainder since last full minute
-				var diff_ms uint64 = uint64(time_diff.Milliseconds()) % 1000 // modulus used to only look at the remainder since last full minute
-
-				fmt.Printf("\rSince Start: %02d:%02d:%02d.%03d", diff_hours, diff_mins, diff_secs, diff_ms) // printing in correct format (overwriting prev line)
-			}
-			sync_mu.Unlock()
-		}
-	}
-}
-
-// run in the background in a goroutine --> printing remaining time if available every so often
-func print_remaining_timer(ctx context.Context, p_curr_time *time.Time, p_user_set_timer_duration *time.Duration, p_timer_end_time *time.Time, p_should_print_flag *bool, beep_flag bool) {
-	var time_diff time.Duration
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			time.Sleep(5 * time.Millisecond) // print every 500ms
-			sync_mu.Lock()
-			if !((*p_user_set_timer_duration) == 0) && (*p_curr_time).Before(*p_timer_end_time) && *p_should_print_flag { // only continue if the timer is set (UNIX == 0 means not set)
-				time_diff = (*p_timer_end_time).Sub(*p_curr_time) // finding remaining time in timer (length until)
-				var remaining_hours uint64 = uint64(time_diff.Hours())
-				var remaining_mins uint64 = uint64(time_diff.Minutes()) % 60                               // modulus used to only look at the remainder since last full hour
-				var remaining_secs uint64 = uint64(time_diff.Seconds()) % 60                               // modulus used to only look at the remainder since last full minute
-				fmt.Printf("\rRemaining: %02d:%02d:%02d", remaining_hours, remaining_mins, remaining_secs) // printing in correct format (overwriting prev line)
-			} else if (*p_curr_time).After(*p_timer_end_time) && *p_should_print_flag && beep_flag { // beeping sound at the end of the timer
-				*p_should_print_flag = false // Stop printing
-
-				// playing a beep through the computer speakers to symbolise the beep
-				var cmd *exec.Cmd // init executable command obj
-
-				switch runtime.GOOS { // checking if the current operating system for beep
-				case "windows":
-					cmd = exec.Command("powershell", "-c", "for ($i=0; $i -lt 3; $i++) { [console]::beep(750, 300); Start-Sleep -Milliseconds 100 }") // 1000Hz sound 3x (500ms breaks)
-				case "darwin":
-					// Use the afplay command to play a built-in sound on macOS
-					cmd = exec.Command("afplay", "/System/Library/Sounds/Glass.aiff")
-				case "linux":
-					// Use the aplay command to play a built-in sound on Linux
-					cmd = exec.Command("aplay", "/usr/share/sounds/alsa/Front_Center.wav") // Change this to your preferred sound file
-				default:
-					return
-				}
-				if err := cmd.Run(); err != nil {
-					log.Println("ERROR: could not play the beep sound")
-					panic(err)
-				}
-			}
-			sync_mu.Unlock()
-		}
-	}
+	exec_dir := filepath.Dir(exec_path) // Get the directory of the executable
+	return exec_dir, nil
 }
 
 func main() {
-	// init vars
-	var beep_flag bool = true
-	log.SetOutput(os.Stderr)                                    // pretty sure it writes to this by default
-	ctx, ctx_cancel := context.WithCancel(context.Background()) // cancel at end of program to close all goroutines
-	defer ctx_cancel()                                          // closing all goroutines on program end
-	var current_time_obj time.Time                              // init current time
-
-	// asking user what is to occur (stopwatch or timer)
-	fmt.Print("=============================\n")
-	fmt.Println("s --> Choose Stopwatch")
-	fmt.Println("t --> Choose Timer")
-	fmt.Println("q --> Quit")
-	fmt.Print("=============================\n")
-
-	var avail_base_keys []rune = []rune{'s', 't', 'q'}
-	stop_or_timer_choice, user_input_err := accept_and_clean_user_input(&avail_base_keys)
-	if user_input_err != nil {
-		log.Println("ERROR:", user_input_err.Error())
-		return
+	// getting the abs location of the current exec
+	exec_dir, exec_err := get_main_dir()
+	if exec_err != nil {
+		log.Fatal("error: ", exec_err.Error())
 	}
 
-	// going into selections
-	if stop_or_timer_choice == 's' {
-		var stopwatch_start_time time.Time = time.Unix(0, 0) // init as UNIX==0 so that the goroutines can see this as "not set"
-		var should_print_flag bool = false
-
-		// print help information
-		fmt.Print("\n")
-		fmt.Print("################\n")
-		fmt.Print("$$$ STOPWATCH $$$\n")
-		fmt.Println("s --> Start Stopwatch")
-		fmt.Println("e --> End Stopwatch")
-		fmt.Println("r --> Reset Stopwatch")
-		fmt.Println("q --> Quit")
-		fmt.Print("################\n\n")
-
-		// goroutine to consistently print the current time
-		go constant_update_current_time(ctx, &current_time_obj)
-		go print_time_since_stopwatch_start(ctx, &current_time_obj, &stopwatch_start_time, &should_print_flag) // only prints if the stopwatch_start_time exists
-
-		// infinite loop --> waiting for user input
-		var avail_resp_keys []rune = []rune{'s', 'e', 'r', 'q'}
-		for {
-			valid_r, char_get_err := accept_and_clean_user_input(&avail_resp_keys)
-			if char_get_err != nil {
-				log.Println("ERROR:", char_get_err.Error())
-				return
-			}
-
-			switch valid_r {
-			case 's':
-				should_print_flag = true
-				if stopwatch_start_time.Equal(time.Unix(0, 0)) { // checking if the stopwatch is not currently active
-					stopwatch_start_time = current_time_obj // setting the stopwatch start time to the current time
-				}
-			case 'e':
-				should_print_flag = false
-			case 'r':
-				stopwatch_start_time = time.Unix(0, 0)                       // setting to UNIX time --> tells the funcs that the stopwatch hasn't started
-				fmt.Printf("\rSince Start: %02d:%02d:%02d.%03d", 0, 0, 0, 0) // printing in correct format (overwriting prev line)
-			case 'q':
-				return
-			default:
-				continue // do nothing if byte is not one of these keys
-			}
-		}
-
-	} else if stop_or_timer_choice == 't' {
-		// init timer-related variables
-		var timer_end_time time.Time = time.Unix(0, 0)
-		var user_set_timer_duration time.Duration = 0
-		var remaining_timer_duration time.Duration = 0
-		var should_print_flag bool = false
-
-		// print help information
-		fmt.Print("\n")
-		fmt.Print("################\n")
-		fmt.Print("$$$ TIMER $$$\n")
-		fmt.Println("u --> Update Timer")
-		fmt.Println("s --> Start Timer")
-		fmt.Println("e --> End Timer")
-		fmt.Println("r --> Reset Timer")
-		fmt.Println("q --> Quit")
-		fmt.Print("################\n\n")
-
-		// goroutine to consistently print the current time
-		go constant_update_current_time(ctx, &current_time_obj)
-		go print_remaining_timer(ctx, &current_time_obj, &user_set_timer_duration, &timer_end_time, &should_print_flag, beep_flag) // only prints if the stopwatch_start_time exists
-
-		// infinite loop --> waiting for user input
-		var avail_resp_keys []rune = []rune{'u', 's', 'e', 'r', 'q'}
-		for {
-			valid_r, char_get_err := accept_and_clean_user_input(&avail_resp_keys)
-			if char_get_err != nil {
-				log.Println("ERROR:", char_get_err.Error())
-				return
-			}
-
-			switch valid_r {
-			case 'u':
-				// getting user input
-				fmt.Print("\033[A\033[K")
-				fmt.Print("\rEnter time in format HH:mm:SS and press enter (e.g., 02:15:30): ")
-				var new_timer_string string
-				_, scan_err := fmt.Scanf("%s", &new_timer_string)
-				if scan_err != nil {
-					log.Println("ERROR:", scan_err.Error())
-					return
-				}
-
-				// checking user input --> print message if poor format parsed
-				new_timer_string = strings.TrimSpace(new_timer_string)                 // removing all spaces on the ends
-				var timer_string_parts []string = strings.Split(new_timer_string, ":") // splitting on the colons
-				if len(timer_string_parts) != 3 {
-					log.Println("ERROR: Invalid string format. Must adhere to HH:mm:SS")
-					continue
-				}
-
-				// grabbing the time as valid integers from the parsed user string
-				hours, err := strconv.Atoi(timer_string_parts[0])
-				if err != nil {
-					log.Println("Invalid hours value:", err)
-					continue
-				}
-				minutes, err := strconv.Atoi(timer_string_parts[1])
-				if err != nil {
-					log.Println("Invalid minutes value:", err)
-					continue
-				}
-				seconds, err := strconv.Atoi(timer_string_parts[2])
-				if err != nil {
-					log.Println("Invalid seconds value:", err)
-					continue
-				}
-
-				// creating a duration object for the timer from the user parsed string
-				user_set_timer_duration = time.Duration(hours)*time.Hour +
-					time.Duration(minutes)*time.Minute +
-					time.Duration(seconds)*time.Second
-
-				// printing the new duration (even though its stopped)
-				fmt.Printf("\rRemaining: %02d:%02d:%02d",
-					int64(user_set_timer_duration.Hours()), int64(user_set_timer_duration.Minutes())%60,
-					int64(user_set_timer_duration.Seconds())%60) // printing in correct format (overwriting prev line)
-
-			case 's':
-				// check remaining time --> add to the current time to find the new stopping time
-				should_print_flag = true
-				if remaining_timer_duration > 0 {
-					timer_end_time = current_time_obj.Add(remaining_timer_duration)
-					remaining_timer_duration = 0
-				}
-
-				// starting a new timer
-				if timer_end_time.Equal(time.Unix(0, 0)) || timer_end_time.Before(current_time_obj) { // checking if the stopwatch is not currently active
-					timer_end_time = current_time_obj.Add(user_set_timer_duration) // setting the stopwatch start time to the current time
-				}
-			case 'e':
-				should_print_flag = false
-				remaining_timer_duration = timer_end_time.Sub(current_time_obj)
-
-			case 'r':
-				should_print_flag = false
-				timer_end_time = time.Unix(0, 0) // setting to UNIX time --> tells the funcs that the stopwatch hasn't started
-				remaining_timer_duration = 0
-				fmt.Printf("\rRemaining: %02d:%02d:%02d",
-					int64(user_set_timer_duration.Hours()), int64(user_set_timer_duration.Minutes())%60,
-					int64(user_set_timer_duration.Seconds())%60) // printing in correct format (overwriting prev line)
-			case 'q':
-				return
-			default:
-				continue // do nothing if byte is not one of these keys
-			}
-		}
-
+	// setting the logfile location
+	var logfile_loc string = filepath.Join(exec_dir, "logfile.log")
+	logfile, log_err := os.OpenFile(logfile_loc, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666) // Open the file in append mode, create it if it doesn't exist, with write permissions
+	if log_err != nil {
+		log.Fatal(log_err)
 	}
+	defer logfile.Close()
+	log.SetOutput(logfile) // setting the log to
+
+	// Reading the necessary config file for user defined window size and placement
+	var configData []byte = readConfigFile()
+	largeConfig, mediumConfig, smallConfig := manipConfigData(configData) // Returns 3x structs (1x struct for each window size)
+
+	// Creating a time ticker (CLK)
+	var ticker *time.Ticker = time.NewTicker(30 * time.Millisecond) // Check for keypress every 30ms (should be enough time to avoid using keyboard events whilst minimising resource usage)
+	defer ticker.Stop()                                             // Stopping the ticker if the function is stopped (Shouldn't ever occur)
+
+	for range ticker.C {
+		var shortcutPressed uint8 = shortcutKeysPressed()
+		switch shortcutPressed {
+		case 0: // Passing over this iteration (no shortcuts activated)
+		case 1: // Activate large screen
+			boilerplateScript(&mediumConfig, true) // mediumConfig used as 'fill-in' to avoid another function writeup
+		case 2: // Large size wanted
+			boilerplateScript(&largeConfig, false)
+		case 3: // Medium size wanted
+			boilerplateScript(&mediumConfig, false)
+		case 4: // Small size wanted
+			boilerplateScript(&smallConfig, false)
+		}
+	}
+}
+
+// Reducing boilerplate in the main func
+func boilerplateScript(ptr_configSizeData *configVal, maximiseBool bool) {
+	// Preprocessing - Windows API calls
+	screenWidth, _ := getCurrMonitorRes()                        // Grabbing screen's working area pixel dimensions
+	var currentProgHandle syscall.Handle = getForegroundWindow() // Grabbing the currently focused window ID
+
+	// Calculating startWidth (middle) from current screen
+	var startWidth int = int(screenWidth/2) - int((*ptr_configSizeData).windowX/2)
+
+	// Changing the window size and location using a windows API call
+	setWindowPos(currentProgHandle, startWidth, (*ptr_configSizeData).startHeight, (*ptr_configSizeData).windowX, (*ptr_configSizeData).windowY, maximiseBool)
+}
+
+/////////////////////////////////////////////////////////////////
+/////////////////////////// MAIN FUNC ///////////////////////////
+/////////////////////////////////////////////////////////////////
+
+// Checks if the keyboard shortcut keys were pressed --> Invalid return 0 | [alt+shift+0:Maximise] return 1 | [alt+shift+9:Large] return 2 | [alt+shift+8:Medium] return 3 | [alt+shift+7:Small] return 4
+func shortcutKeysPressed() uint8 {
+	leftAltPressed, _, _ := procGetKeyState.Call(VK_LMENU) // Checking Left Alt
+
+	// NOTE: Result 65409 or 65408 == key currently pressed (presumed: high-order bit is 1 & low-order bit is 0/1 --> 16-bit subtract a value?)
+	if (leftAltPressed & 0x8000) != 0 { // Left Alt Pressed
+		leftShiftPressed, _, _ := procGetKeyState.Call(VK_LSHIFT) // Checking Left Shift
+		if (leftShiftPressed & 0x8000) != 0 {                     // Left Shift Pressed
+			zeroPressed, _, _ := procGetKeyState.Call(VK_ZERO) // Checking Zero
+			if (zeroPressed & 0x8000) != 0 {                   // Zero Pressed --> Maximise Mode Selected
+				return 1
+			}
+			// Nine Pressed --> Large Mode Selected
+			ninePressed, _, _ := procGetKeyState.Call(VK_NINE) // Checking Nine,
+			if (ninePressed & 0x8000) != 0 {                   // Nine Pressed --> Large Mode Selected
+				return 2
+			}
+			// Eight Pressed --> Medium Mode Selected
+			eightPressed, _, _ := procGetKeyState.Call(VK_EIGHT) // Checking Eight,
+			if (eightPressed & 0x8000) != 0 {                    // Eight Pressed --> Medium Mode Selected
+				return 3
+			}
+			// Seven Pressed --> Small Mode Selected
+			sevenPressed, _, _ := procGetKeyState.Call(VK_SEVEN) // Checking Seven,
+			if (sevenPressed & 0x8000) != 0 {                    // Seven Pressed --> Small Mode Selected
+				return 4
+			}
+		}
+	}
+	return 0
+}
+
+// Returns a string that is the directory of the main executable
+func getDirOfMainExe() string {
+	exeLoc, exe_err := os.Executable() // Error not captured because it is useless
+	if exe_err != nil {
+		log.Fatal(exe_err.Error())
+	}
+	var exeDirLoc string = filepath.Dir(exeLoc)
+	return exeDirLoc
+}
+
+// Returns the window that is currently in the foreground
+func getForegroundWindow() syscall.Handle {
+	hwnd, _, foregroundErr := procGetForegroundWindow.Call()
+	if hwnd == 0 {
+		log.Fatal(foregroundErr.Error())
+	}
+	return syscall.Handle(hwnd)
+}
+
+// Returns the resolution of the current monitor --> Returns "workarea", not total resolution
+func getCurrMonitorRes() (int, int) {
+	// Defining constants for function calls
+	const SM_CXSCREEN uintptr = uintptr(0) // Register val for screen res width
+	const SM_CYSCREEN uintptr = uintptr(1) // Register val for screen res height
+
+	screenWidthResult, _, widthErr := procGetSystemMetrics.Call(SM_CXSCREEN)
+	if screenWidthResult == 0 { // Resultant outcome if an error occurs
+		log.Fatal(widthErr.Error())
+	}
+	screenHeightResult, _, heightErr := procGetSystemMetrics.Call(SM_CYSCREEN)
+	if screenHeightResult == 0 { // Resultant outcome if an error occurs
+		log.Fatal(heightErr.Error())
+	}
+	return int(screenWidthResult), int(screenHeightResult)
+}
+
+// Given a window (hwnd), this changes the windows position
+func setWindowPos(currentProgHandle syscall.Handle, locX, locY, windowX, windowY int, maximiseBool bool) {
+	// Set the current window to a "Normal" window to avoid issues with fullscreen not responding to procSetWindowPos
+	const SW_SHOWNORMAL uintptr = uintptr(1) // If the window is minimised, maximised, or arranged, the system restores it to its original size and position.
+	const SW_MAXIMISE uintptr = uintptr(3)   // Flag for maximise
+	if maximiseBool {
+		maximiseResult, _, maxErr := procShowWindow.Call(uintptr(currentProgHandle), SW_MAXIMISE)
+		if maximiseResult == 0 {
+			log.Fatal(maxErr.Error())
+		}
+	} else {
+		showWindowResult, _, showErr := procShowWindow.Call(uintptr(currentProgHandle), SW_SHOWNORMAL)
+		if showWindowResult == 0 {
+			log.Fatal(showErr.Error())
+		}
+		moveResult, _, moveErr := procSetWindowPos.Call(
+			uintptr(currentProgHandle),
+			0, // hWndInsertAfter (Optional) --> HWND_TOP = 0
+			uintptr(locX),
+			uintptr(locY),
+			uintptr(windowX),
+			uintptr(windowY),
+			0x0040, // uFlag: SWP_SHOWWINDOW
+		)
+		if moveResult == 0 {
+			log.Fatal(moveErr.Error())
+		}
+	}
+}
+
+// Returns the config file bytes
+func readConfigFile() []byte {
+	// Finding the location of the config file
+	var mainExecDir string = getDirOfMainExe()                      // Returns the main executable's parent directory
+	var configLoc string = filepath.Join(mainExecDir, "config.txt") // Creating a string to resemble the config file
+
+	// Reading and manipulating config file
+	configData, configErr := os.ReadFile(configLoc)
+	if configErr != nil {
+		log.Fatal(configErr.Error())
+	}
+
+	return configData
+}
+
+// Manipulates config file to extract the necessary integers we want
+func manipConfigData(configData []byte) (configVal, configVal, configVal) {
+	// Intialising the 3 size structs to hold necessary window sizing values
+	var largeConfig configVal
+	var mediumConfig configVal
+	var smallConfig configVal
+
+	// Grabbing configData lines
+	var configString string = string(configData)                 // Converting byte array to string
+	var configLines []string = strings.Split(configString, "\n") // Splitting string into line by line values
+
+	// Viewing each line to extract relevant data
+	for _, line := range configLines {
+		var configLineSplit []string = strings.Split(line, ":")          // Determining size in each line
+		var configId string = strings.TrimSpace(configLineSplit[1])      // Obtaining identifier
+		var configIntTrim string = strings.TrimSpace(configLineSplit[2]) // Obtaining value
+
+		switch strings.TrimSpace(configLineSplit[0]) { // Determines the 'size' of the config value
+		case "L":
+			if configId == "startHeight" {
+				sHLAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+				largeConfig.startHeight = sHLAsInt           // Setting the struct value for function return
+				if err != nil {
+					log.Fatal("failed to conv string --> int")
+				}
+			} else if configId == "windowX" {
+				wXLAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+				largeConfig.windowX = wXLAsInt               // Setting the struct value for function return
+				if err != nil {
+					log.Fatal("failed to conv string --> int")
+				}
+			} else if configId == "windowY" {
+				wYLAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+				largeConfig.windowY = wYLAsInt               // Setting the struct value for function return
+				if err != nil {
+					log.Fatal("failed to conv string --> int")
+				}
+			} else {
+				log.Fatal("invalid L config recognised")
+			}
+		case "M":
+			if configId == "startHeight" {
+				sHMAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+				mediumConfig.startHeight = sHMAsInt          // Setting the struct value for function return
+				if err != nil {
+					log.Fatal("failed to conv string --> int")
+				}
+			} else if configId == "windowX" {
+				wXMAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+				mediumConfig.windowX = wXMAsInt              // Setting the struct value for func return
+				if err != nil {
+					log.Fatal("failed to conv string --> int")
+				}
+			} else if configId == "windowY" {
+				wYMAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+				mediumConfig.windowY = wYMAsInt              // Setting struct val for func return
+				if err != nil {
+					log.Fatal("failed to conv string --> int")
+				}
+			} else {
+				log.Fatal("invalid M config recognised")
+			}
+		case "S":
+			if configId == "startHeight" {
+				sHSAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+				smallConfig.startHeight = sHSAsInt           // Setting struct val for func return
+				if err != nil {
+					log.Fatal("failed to conv string --> int")
+				}
+			} else if configId == "windowX" {
+				wXSAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+				smallConfig.windowX = wXSAsInt               // Setting struct val for func return
+				if err != nil {
+					log.Fatal("failed to conv string --> int")
+				}
+			} else if configId == "windowY" {
+				wYSAsInt, err := strconv.Atoi(configIntTrim) // Converting string to int
+				smallConfig.windowY = wYSAsInt               // Setting struct val for func return
+				if err != nil {
+					log.Fatal("failed to conv string --> int")
+				}
+			} else {
+				log.Fatal("invalid S config recongised")
+			}
+		}
+	}
+
+	// Checking if all values have been successfully retrieved --> Ensure all values are intialised before progressing
+	var checkL bool = ((largeConfig.startHeight != 0) && (largeConfig.windowX != 0) && (largeConfig.windowY != 0)) && true
+	var checkM bool = ((mediumConfig.startHeight != 0) && (mediumConfig.windowX != 0) && (mediumConfig.windowY != 0)) && true
+	var checkS bool = ((smallConfig.startHeight != 0) && (smallConfig.windowX != 0) && (smallConfig.windowY != 0)) && true
+	if !checkL || !checkM || !checkS { // If any values are missing, throw an error
+		log.Fatal("failed to retrieve all required dimensions")
+	}
+
+	return largeConfig, mediumConfig, smallConfig
 }
